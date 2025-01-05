@@ -32,6 +32,10 @@ impl AddressResponse {
     pub fn total_sent(&self) -> u64 {
         self.total_sent.parse().unwrap()
     }
+
+    pub fn balance(&self) -> u64 {
+        self.balance.parse().unwrap()
+    }
 }
 
 pub async fn query_tx_by_txid(client: &Client, url: &str, address: &str) -> Option<Transaction> {
@@ -132,15 +136,10 @@ pub async fn query_all_used_address(
     for c in chunked_addresses {
         let address_futures = c.iter().map(|address| query_address(client, url, address));
         let query_result = future::join_all(address_futures).await;
-        results.extend(
-            query_result
-                .into_iter()
-                .filter_map(|r| r)
-                .filter(|r| r.total_received() > 0),
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        results.extend(query_result.into_iter().filter_map(|r| r));
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
-    results.sort_by_key(|r| r.address.clone());
+    results.sort_by(|a, b| a.address.cmp(&b.address));
     results
 }
 
@@ -201,22 +200,4 @@ pub async fn query_all_tx_by_address(
     }
 
     tx_map
-}
-
-pub async fn query_all_staking_address(
-    client: &Client,
-    url: &str,
-    addresses: Vec<String>,
-) -> Vec<AddressResponse> {
-    let address_futures = addresses
-        .iter()
-        .map(|address| query_address(client, url, address));
-    let query_result = future::join_all(address_futures).await;
-    let mut results: Vec<AddressResponse> = query_result
-        .into_iter()
-        .filter_map(|r| r)
-        .filter(|r| r.total_received() > 10_000_000)
-        .collect();
-    results.sort_by_key(|r| r.address.clone());
-    results
 }

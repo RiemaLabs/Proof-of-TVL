@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bitcoin = "0.32.5"
+bitcoin = { version = "0.32.5", features = ["serde"] }
+chrono = "0.4.39"
 dotenv = "0.15.0"
-esplora-client = "0.11.0"
 futures = "0.3.31"
 hex = "0.4.3"
 reqwest = { version = "0.11", features = ["json"] }

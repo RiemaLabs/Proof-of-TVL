@@ -1,18 +1,16 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufRead, BufWriter, Write},
 };
 
 use bitcoin::Transaction;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     analyze::deduplicate,
-    query::{
-        query_all_staking_address, query_all_tx_by_address, query_all_used_address, AddressResponse,
-    },
+    query::{query_all_tx_by_address, query_all_used_address, AddressResponse},
 };
 
 const API_URL: &str = "https://mainnet.prod.lombard.finance/api/v1/addresses";
@@ -106,7 +104,21 @@ pub async fn cache_deposit_address(addresses: Vec<String>) -> Vec<AddressRespons
     dotenv::dotenv().ok();
     let client = Client::new();
     let url = std::env::var("QUICKNODE_BB_RPC").expect("API_URL must be set");
-    let used_addresses = query_all_used_address(&client, &url, addresses).await;
+    let exist_addresses = load_deposit_address();
+    let exist_address_set: HashSet<String> = exist_addresses
+        .iter()
+        .map(|address| address.address.clone())
+        .collect();
+    let update_addresses: Vec<String> = addresses
+        .into_iter()
+        .filter(|address| !exist_address_set.contains(address))
+        .collect();
+    let update_addresses = query_all_used_address(&client, &url, update_addresses).await;
+    let mut used_addresses = exist_addresses
+        .into_iter()
+        .chain(update_addresses)
+        .collect::<Vec<_>>();
+    used_addresses.sort_by(|a, b| a.address.cmp(&b.address));
 
     let file = File::create(LOMBARD_FILE1).unwrap();
     let mut writer = BufWriter::new(file);
@@ -128,64 +140,6 @@ pub fn load_deposit_address() -> Vec<AddressResponse> {
     let addresses = reader
         .lines()
         .filter_map(|line| serde_json::from_str(&line.unwrap()).ok())
-        .collect();
-    addresses
-}
-
-pub const LOMBARD_FILE2: &str = "2_lombard_deposit_txs.json";
-
-pub async fn cache_deposit_txs(addresses: Vec<String>) -> HashMap<String, Vec<Transaction>> {
-    dotenv::dotenv().ok();
-    let client = Client::new();
-    let url = std::env::var("QUICKNODE_BB_RPC").expect("API_URL must be set");
-    let mapping = query_all_tx_by_address(&client, &url, addresses).await;
-    let file = File::create(LOMBARD_FILE2).unwrap();
-    let writer = BufWriter::new(file);
-    serde_json::to_writer(writer, &mapping).unwrap();
-
-    mapping
-}
-
-pub fn load_deposit_txs() -> HashMap<String, Vec<bitcoin::Transaction>> {
-    let path = std::path::Path::new(LOMBARD_FILE2);
-    if !path.exists() {
-        return HashMap::new();
-    }
-    let file = File::open(path).unwrap();
-    let reader = std::io::BufReader::new(file);
-    let mapping: HashMap<String, Vec<bitcoin::Transaction>> =
-        serde_json::from_reader(reader).unwrap();
-    mapping
-}
-
-pub const LOMBARD_FILE3: &str = "3_lombard_staking_addresses.txt";
-
-pub async fn cache_staking_addresses(addresses: Vec<String>) -> Vec<AddressResponse> {
-    dotenv::dotenv().ok();
-    let client = Client::new();
-    let url = std::env::var("QUICKNODE_BB_RPC").expect("API_URL must be set");
-    let used_addresses = query_all_staking_address(&client, &url, addresses).await;
-
-    let file = File::create(LOMBARD_FILE3).unwrap();
-    let mut writer = BufWriter::new(file);
-
-    for address in &used_addresses {
-        writeln!(writer, "{}", serde_json::to_string(address).unwrap()).unwrap();
-    }
-
-    used_addresses
-}
-
-pub fn load_staking_addresses() -> Vec<AddressResponse> {
-    let path = std::path::Path::new(LOMBARD_FILE3);
-    if !path.exists() {
-        return vec![];
-    }
-    let file = File::open(path).unwrap();
-    let reader = std::io::BufReader::new(file);
-    let addresses: Vec<AddressResponse> = reader
-        .lines()
-        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
         .collect();
     addresses
 }
@@ -216,6 +170,28 @@ pub fn load_staking_txs() -> HashMap<String, Vec<bitcoin::Transaction>> {
     mapping
 }
 
+pub async fn query_lbtc() -> Option<f64> {
+    let url = "https://api.coingecko.com/api/v3/coins/lombard-staked-btc";
+
+    let response = reqwest::get(url).await;
+    if response.is_err() {
+        println!("Failed to fetch data: {:?}", response.err());
+        return None;
+    }
+    let response = response.unwrap();
+    if response.status().is_success() {
+        let json: Result<serde_json::Value, reqwest::Error> = response.json().await;
+        if json.is_err() {
+            return None;
+        }
+        let json = json.unwrap();
+        json["market_data"]["total_supply"].as_f64()
+    } else {
+        println!("Failed to fetch data. HTTP status: {}", response.status());
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -230,12 +206,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_deposit_address() {
-        let addresses = query_deposit_address().await.unwrap();
+        let addresses = load_lombard_address();
         cache_deposit_address(addresses).await;
     }
 
     #[test]
-    fn test_load_received_lombard_address() {
+    fn test_load_deposit_address() {
         let addresses = load_deposit_address();
         let addresses = addresses
             .into_iter()
@@ -245,18 +221,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_address_txs_mapping() {
+    async fn test_cache_staking_txs() {
         let addresses = load_deposit_address();
         let addresses = addresses
             .into_iter()
             .map(|address| address.address)
             .collect::<Vec<String>>();
-        cache_deposit_txs(addresses).await;
+        cache_staking_txs(addresses).await;
     }
 
     #[test]
-    fn test_load_cached_txs_mapping() {
-        let mapping = load_deposit_txs();
+    fn test_load_staking_txs() {
+        let mapping = load_staking_txs();
         assert!(!mapping.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_lbtc() {
+        let result = query_lbtc().await.unwrap();
+        println!("Total LBTC supply: {}", result);
     }
 }

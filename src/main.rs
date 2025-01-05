@@ -1,11 +1,16 @@
 use analyze::analyze_address_babylon_staking;
+use chrono::Utc;
 
 mod analyze;
 mod query;
 mod steps;
 
+const SATS: u64 = 100_000_000;
+
 #[tokio::main]
 async fn main() {
+    // -------- Notice cached data are used here. Remove the cache and fetch them again to get the latest result. --------
+
     // -------- Step 0: Initialize addresses --------
     let mut cached_address = steps::load_lombard_address();
     if cached_address.is_empty() {
@@ -18,18 +23,16 @@ async fn main() {
         cached_deposit_address = steps::cache_deposit_address(cached_address).await;
     }
 
-    println!(
-        "Holding BTC amount: {}",
-        cached_deposit_address
-            .iter()
-            .map(|address| address.total_received() - address.total_sent())
-            .sum::<u64>()
-    );
+    let btc_on_chain = cached_deposit_address
+        .iter()
+        .map(|address| address.balance() as f64)
+        .sum::<f64>()
+        / SATS as f64;
 
     // Ignore addresss with less than 10 BTC to speed up.
     let cached_staking_addresses = cached_deposit_address
         .into_iter()
-        .filter(|address| address.total_received() - address.total_sent() > 10_00_000_000)
+        .filter(|address| address.balance() > 10 * SATS)
         .map(|address| address.address)
         .collect::<Vec<String>>();
 
@@ -46,8 +49,44 @@ async fn main() {
         if sub_amount == 0 {
             continue;
         }
-        println!("Staked BTC in address {}: {}", address, sub_amount);
+        println!(
+            "Address {} stakes {:.4} BTC in Babylon",
+            address,
+            sub_amount as f64 / SATS as f64
+        );
         amount += sub_amount;
     }
-    println!("Staking BTC amount: {}", amount);
+    println!("");
+    let staked_btc = amount as f64 / SATS as f64;
+
+    println!(
+        "BTC On-Chain Collateral: {:.4} BTC ({:.4} BTC / {:.2}% Staked)",
+        btc_on_chain,
+        staked_btc,
+        staked_btc / btc_on_chain * 100.0
+    );
+
+    // -------- Step 3: Query LBTC Amount --------
+    let lbtc_total_supply = steps::query_lbtc().await.unwrap();
+
+    println!(
+        "LBTC Total Supply: {:.4} LBTC ({:.2}% Collateralized)",
+        lbtc_total_supply,
+        btc_on_chain / lbtc_total_supply * 100.0
+    );
+    if btc_on_chain / lbtc_total_supply > 1.0 {
+        println!(
+            "Status: SAFE ({:.2}% Collateralized)",
+            btc_on_chain / lbtc_total_supply * 100.0
+        );
+    } else {
+        println!(
+            "Status: UNSAFE ({:.2}% Collateralized)",
+            btc_on_chain / lbtc_total_supply * 100.0
+        );
+    }
+    println!(
+        "Latest Verification Time: {}",
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
 }
